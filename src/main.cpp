@@ -148,5 +148,5 @@ if (umidadeSolo_feedback != umidadeSolo || temperatura_feedback != temperatura |
   // Serial.print(R0_media);
   // Serial.print("\n");
 
-  delay(800);
+  delay(1000);
 }
