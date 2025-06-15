@@ -1,152 +1,223 @@
 //==============================================================================================
+// Bibliotecas
+//==============================================================================================
 #include <Arduino.h>
 #include <DHT.h>
+#include <WiFi.h>
+#include <BlynkSimpleEsp32.h>
 
-//=============================================================================================
+//==============================================================================================
+// Definições de Pinos
+//==============================================================================================
+// Saídas de sinalização (LEDs, relés, etc.)
+#define PIN_GAS_OUT 18
+#define PIN_TEMP_OUT 19
+#define PIN_UMISOLO_OUT 21
+#define PIN_UMIAR_OUT 22
 
-#define gas_out 18
-#define temp_out 19
-#define umiSolo_out 21
-#define umiAr_out 22
+// Pinos de entrada dos sensores
+#define PIN_HIGROMETRO 34
+#define PIN_DHT22 4
+#define PIN_MQ135 12
 
-//=============================================================================================
+//==============================================================================================
+// Configurações e Limites dos Sensores
+//==============================================================================================
+// Configuração do DHT22
+#define DHTTYPE DHT22 // Define o tipo de sensor DHT (DHT22 ou DHT11)
 
-#define HIGROMETRO 34
-bool estado_valvula = false;
-float umidadeSolo = 0.0;
+// Parâmetros de calibração do MQ135 (para CO2)
+#define MQ135_PARAM_A 116.6020682
+#define MQ135_PARAM_B 2.769034857
+#define MQ135_RL 10.0 // Resistência de carga em KΩ
 
-//=============================================================================================
+// Limites para acionamento das saídas
+const float LIMIT_GAS_PPM = 750.0;
+const float LIMIT_TEMP_CELSIUS = 30.0;
+const float LIMIT_UMIAR_PERCENT = 55.0;
+const float LIMIT_UMISOLO_MIN_PERCENT = 55.0;
+const float LIMIT_UMISOLO_MAX_PERCENT = 65.0;
 
-#define DHT22_PIN 4
-#define DHTTYPE DHT22
-DHT DHT22_Sensor(DHT22_PIN, DHTTYPE);
+//==============================================================================================
+// Variáveis Globais
+//==============================================================================================
+// Instâncias de sensores
+DHT dhtSensor(PIN_DHT22, DHTTYPE);
 
-float temperatura = 0.0;
-float umidadeAr = 0.0;
+// Variáveis de estado dos sensores
+float temperaturaCelsius = 0.0;
+float umidadeArPercent = 0.0;
+float umidadeSoloPercent = 0.0;
+float co2PPM = 0.0;
 
-//=============================================================================================
+// Variáveis de controle
+bool estadoValvula = false;
+float mq135_R0 = 0.0; // R0 calibrado para o MQ135
 
-#define MQ135 12
-#define PARAMETROA 116.6020682
-#define PARAMETROB 2.769034857
+// Variáveis de calibração do MQ135
+float r0CalibracaoAtual = 0.0;
+float r0CalibracaoAnterior = 0.0;
+float r0MediaCalibracao = 0.0;
+int contadorCalibracao = 0;
 
-float CO2 = 0.0;
-float RL = 10;  // Resistência de carga em KΩ
-float R0 = 170; // Resistência de carga em KΩ
+//==============================================================================================
+// Protótipos de Funções
+//==============================================================================================
+void inicializarSensoresEPinos();
+void lerDadosSensores();
+void atualizarSaidas();
+void imprimirDadosSerial();
+float calibrarMQ135();
+void limparSerial();
 
-//=============================================================================================
+//==============================================================================================
+// Configuração Inicial (setup)
+//==============================================================================================
+void setup() {
+  Serial.begin(115200);
+  inicializarSensoresEPinos();
+  mq135_R0 = calibrarMQ135(); // Calibra o sensor MQ135 uma vez na inicialização
+}
 
-float gas_limit = 750.0;
-float temp_limit = 30.0;
-float umidadeAr_limit = 55;
-float umi_limit_max = 65;
-float umi_limit_min = 55;
+//==============================================================================================
+// Loop Principal (loop)
+//==============================================================================================
+void loop() {
+  lerDadosSensores();
+  atualizarSaidas();
+  imprimirDadosSerial(); // Imprime dados apenas quando há mudança significativa
+  delay(500); // Pequeno atraso para estabilidade e leitura
+}
 
-//=============================================================================================
+//==============================================================================================
+// Implementação das Funções
+//==============================================================================================
 
-float R0_calibracao = 0.0;
-float R0_calibracao_antigo = 0.0;
-float R0_media = 0.0;
+void inicializarSensoresEPinos() {
+  dhtSensor.begin();
+  pinMode(PIN_GAS_OUT, OUTPUT);
+  pinMode(PIN_TEMP_OUT, OUTPUT);
+  pinMode(PIN_UMISOLO_OUT, OUTPUT);
+  pinMode(PIN_UMIAR_OUT, OUTPUT);
+  // Não é necessário configurar HIGROMETRO e MQ135 como INPUT, são lidos com analogRead
+}
 
-void clearSerial()
-{
-  for (int i = 0; i < 50; i++)
-  {
+void limparSerial() {
+  for (int i = 0; i < 50; i++) {
     Serial.println();
   }
 }
 
-void setup()
-{
-  Serial.begin(115200);
-  DHT22_Sensor.begin();
+float calibrarMQ135() {
+  const int NUM_LEITURAS_CALIBRACAO = 30; // Reduzido para agilizar o processo inicial
+  Serial.println("Iniciando calibracao do MQ135...");
 
-  pinMode(gas_out, OUTPUT);
-  pinMode(temp_out, OUTPUT);
-  pinMode(umiSolo_out, OUTPUT);
-  pinMode(umiAr_out, OUTPUT);
+  for (int i = 0; i < NUM_LEITURAS_CALIBRACAO; i++) {
+    float sensorValue = analogRead(PIN_MQ135);
+    float Vout = (sensorValue / 4095.0) * 3.3; // Converte para tensão (considerando 3.3V AREF)
+    float Rs = MQ135_RL * (3.3 - Vout) / Vout;
+
+    // Fórmula para calcular R0 a partir de Rs em ar limpo (considerando 420ppm CO2 no ar ambiente)
+    // Usando a equação Rs/R0 = A * (PPM)^-B => R0 = Rs / (A * (PPM)^-B)
+    r0CalibracaoAtual = Rs / pow(420.0 / MQ135_PARAM_A, -1.0 / MQ135_PARAM_B);
+
+    // Média móvel simples para estabilizar R0
+    r0MediaCalibracao = (r0MediaCalibracao * i + r0CalibracaoAtual) / (i + 1);
+
+    Serial.print("CALIBRANDO MQ135 - Leitura ");
+    Serial.print(i + 1);
+    Serial.print("/");
+    Serial.print(NUM_LEITURAS_CALIBRACAO);
+    Serial.print(" - R0 provisorio: ");
+    Serial.println(r0MediaCalibracao, 2); // Exibe com 2 casas decimais
+
+    delay(500);
+  }
+  Serial.print("Calibracao MQ135 finalizada. R0 = ");
+  Serial.println(r0MediaCalibracao, 2);
+  return r0MediaCalibracao;
 }
 
-void loop()
-{
+void lerDadosSensores() {
+  // Leitura do Sensor de Umidade do Solo
+  int valorMedidoSolo = analogRead(PIN_HIGROMETRO);
+  // Mapeia o valor do sensor (0-4095) para porcentagem de umidade (0-100)
+  // Ajuste os limites de '1600' e '4095' conforme a calibração do seu sensor de solo
+  umidadeSoloPercent = (valorMedidoSolo < 1600) ? 100.0 : map(valorMedidoSolo, 1600, 4095, 100, 0);
 
-  //=============Configuração e Leitura Sensor de Umidade do Solo==================================================================================
+  // Leitura do Sensor DHT22
+  float novaTemperatura = dhtSensor.readTemperature();
+  float novaUmidadeAr = dhtSensor.readHumidity();
 
-  float umidadeSolo_feedback = umidadeSolo;
-  float valor_medido = analogRead(HIGROMETRO);
+  // Verifica se a leitura do DHT22 foi bem sucedida
+  if (isnan(novaTemperatura) || isnan(novaUmidadeAr)) {
+    Serial.println("Erro ao ler do sensor DHT!");
+  } else {
+    temperaturaCelsius = novaTemperatura;
+    umidadeArPercent = novaUmidadeAr;
+  }
 
-  umidadeSolo = (valor_medido < 1600) ? 100 : map(valor_medido, 1600, 4095, 100, 0);
-
-  //===========================Leitura do Sensor DHT22=====================================================================================
-
-  float temperatura_feedback = temperatura;
-  temperatura = DHT22_Sensor.readTemperature();
-
-  float umidadeAr_feedback = umidadeAr;
-  umidadeAr = DHT22_Sensor.readHumidity();
-
-  //===========================Leitura do Sensor MQ135=====================================================================================
-
-  float CO2_feedback = CO2;
-  float sensorValue = analogRead(MQ135);
-
-  float Vout = (sensorValue / 4095) * 3.3; // Converte para tensão
-  float Rs = RL * (3.3 - Vout) / Vout;     // Calcula Rs
-  // R0 = Rs / pow(420.0 / PARAMETROA, -1.0 / PARAMETROB);
-
-  float ratio = Rs / R0;                        // Calcula a relação Rs/R0
-  CO2 = (PARAMETROA * pow(ratio, -PARAMETROB)); // Fórmula para CO2
-
-  //===============================================================================================================
-
-if (umidadeSolo_feedback != umidadeSolo || temperatura_feedback != temperatura || umidadeAr_feedback != umidadeAr || abs(CO2 - CO2_feedback) > 150)
-{
-  clearSerial();
-
-  Serial.print("Umidade:");
-  Serial.print(umidadeSolo);
-  Serial.print("%");
-  Serial.print("\n");
-
-  Serial.print("Umidade do ar: ");
-  Serial.print(umidadeAr);
-  Serial.print(" %\n");
-
-  Serial.print("Temperatura: ");
-  Serial.print(temperatura);
-  Serial.print(" °C\n");
-
-  Serial.print("Gas:");
-  Serial.print(CO2);
-
-  Serial.print("ppm\n");
+  // Leitura do Sensor MQ135 (CO2)
+  int sensorValueMQ135 = analogRead(PIN_MQ135);
+  float VoutMQ135 = (sensorValueMQ135 / 4095.0) * 3.3; // Converte para tensão
+  float RsMQ135 = MQ135_RL * (3.3 - VoutMQ135) / VoutMQ135; // Calcula Rs
+  float ratioMQ135 = RsMQ135 / mq135_R0; // Calcula a relação Rs/R0
+  co2PPM = (MQ135_PARAM_A * pow(ratioMQ135, -MQ135_PARAM_B)); // Fórmula para CO2
 }
 
-  //===============================================================================================================
+void atualizarSaidas() {
+  // Saída de Gás (CO2)
+  digitalWrite(PIN_GAS_OUT, co2PPM >= LIMIT_GAS_PPM ? HIGH : LOW);
 
-  digitalWrite(gas_out, CO2 >= gas_limit ? HIGH : LOW);
-  digitalWrite(temp_out, temperatura >= temp_limit ? HIGH : LOW);
-  digitalWrite(umiAr_out, umidadeAr >= umidadeAr_limit ? HIGH : LOW);
+  // Saída de Temperatura
+  digitalWrite(PIN_TEMP_OUT, temperaturaCelsius >= LIMIT_TEMP_CELSIUS ? HIGH : LOW);
 
-  if (!estado_valvula && umidadeSolo <= umi_limit_min)
-  {
-    estado_valvula = true;
+  // Saída de Umidade do Ar
+  digitalWrite(PIN_UMIAR_OUT, umidadeArPercent >= LIMIT_UMIAR_PERCENT ? HIGH : LOW);
+
+  // Controle da Válvula de Umidade do Solo (Lógica de Histerese)
+  if (!estadoValvula && umidadeSoloPercent <= LIMIT_UMISOLO_MIN_PERCENT) {
+    estadoValvula = true; // Liga a válvula se a umidade estiver abaixo do mínimo
+  } else if (estadoValvula && umidadeSoloPercent >= LIMIT_UMISOLO_MAX_PERCENT) {
+    estadoValvula = false; // Desliga a válvula se a umidade atingir o máximo
   }
-  else if (estado_valvula && umidadeSolo >= umi_limit_max)
-  {
-    estado_valvula = false;
+  digitalWrite(PIN_UMISOLO_OUT, estadoValvula ? HIGH : LOW);
+}
+
+void imprimirDadosSerial() {
+  static float lastTemperatura = 0.0;
+  static float lastUmidadeAr = 0.0;
+  static float lastUmidadeSolo = 0.0;
+  static float lastCo2 = 0.0;
+
+  // Verifica se houve mudança significativa para evitar spam na serial
+  if (abs(temperaturaCelsius - lastTemperatura) > 0.1 ||
+      abs(umidadeArPercent - lastUmidadeAr) > 0.1 ||
+      abs(umidadeSoloPercent - lastUmidadeSolo) > 0.1 ||
+      abs(co2PPM - lastCo2) > 50) { // Tolerância maior para CO2 devido a flutuações
+
+    limparSerial(); // Limpa a serial para uma nova impressão
+
+    Serial.print("Umidade do Solo: ");
+    Serial.print(umidadeSoloPercent);
+    Serial.println("%");
+
+    Serial.print("Umidade do Ar: ");
+    Serial.print(umidadeArPercent);
+    Serial.println("%");
+
+    Serial.print("Temperatura: ");
+    Serial.print(temperaturaCelsius);
+    Serial.println(" °C");
+
+    Serial.print("CO2: ");
+    Serial.print(co2PPM);
+    Serial.println(" ppm");
+
+    // Atualiza os valores anteriores
+    lastTemperatura = temperaturaCelsius;
+    lastUmidadeAr = umidadeArPercent;
+    lastUmidadeSolo = umidadeSoloPercent;
+    lastCo2 = co2PPM;
   }
-  digitalWrite(umiSolo_out, estado_valvula ? HIGH : LOW);
-
-  // R0_calibracao_antigo = R0_calibracao;
-
-  // R0_calibracao = Rs / pow(420.0 / PARAMETROA, -1.0 / PARAMETROB);
-
-  // R0_media = ((R0_calibracao + R0_calibracao_antigo) / 2 + (R0_media)) / 2;
-
-  // Serial.print("R0 média:");
-  // Serial.print(R0_media);
-  // Serial.print("\n");
-
-  delay(1000);
 }
