@@ -1,3 +1,7 @@
+#define BLYNK_TEMPLATE_ID "TMPL2POjxEM79"
+#define BLYNK_TEMPLATE_NAME "Estufa inteligente"
+#define BLYNK_AUTH_TOKEN "CZMxxf6gMncDfxlJSCz2esLFx-yxdyhC" 
+
 //==============================================================================================
 // Bibliotecas
 //==============================================================================================
@@ -6,8 +10,6 @@
 #include <WiFi.h>
 #include <BlynkSimpleEsp32.h>
 
-
-//TESTE
 //==============================================================================================
 // Definições de Pinos
 //==============================================================================================
@@ -21,6 +23,17 @@
 #define PIN_HIGROMETRO 34
 #define PIN_DHT22 4
 #define PIN_MQ135 12
+
+#define VIRTUAL_PIN_LED_TEMP V9       // Definição do pino virtual para blynk
+#define VIRTUAL_PIN_LED_UMIAR V10     // Definição do pino virtual para blynk
+#define VIRTUAL_PIN_LED_GAS V11       // Definição do pino virtual para blynk
+#define VIRTUAL_PIN_LED_UMISOLO V12   // Definição do pino virtual para blynk
+
+char auth[] = BLYNK_AUTH_TOKEN;
+char ssid[] = "Wokwi-GUEST"; // Seu SSID do Wi-Fi
+char pass[] = "";           // Sua senha do Wi-Fi
+
+BlynkTimer timer;
 
 //==============================================================================================
 // Configurações e Limites dos Sensores
@@ -77,6 +90,7 @@ void limparSerial();
 //==============================================================================================
 void setup() {
   Serial.begin(115200);
+  Blynk.begin(auth, ssid, pass);
   inicializarSensoresEPinos();
   mq135_R0 = calibrarMQ135(); // Calibra o sensor MQ135 uma vez na inicialização
 }
@@ -165,17 +179,26 @@ void lerDadosSensores() {
   float RsMQ135 = MQ135_RL * (3.3 - VoutMQ135) / VoutMQ135; // Calcula Rs
   float ratioMQ135 = RsMQ135 / mq135_R0; // Calcula a relação Rs/R0
   co2PPM = (MQ135_PARAM_A * pow(ratioMQ135, -MQ135_PARAM_B)); // Fórmula para CO2
+
+  // Enviar dados do sensor para o Blynk
+  Blynk.virtualWrite(V0, temperaturaCelsius); // Temperatura
+  Blynk.virtualWrite(V1, umidadeArPercent); // Umidade do ar
+  Blynk.virtualWrite(V3, co2PPM); // Concentração de CO2
+  Blynk.virtualWrite(V2, umidadeSoloPercent); // Umidade do solo
 }
 
 void atualizarSaidas() {
   // Saída de Gás (CO2)
   digitalWrite(PIN_GAS_OUT, co2PPM >= LIMIT_GAS_PPM ? HIGH : LOW);
+  Blynk.virtualWrite(PIN_GAS_OUT, co2PPM >= LIMIT_GAS_PPM ? 255 : 0);
 
   // Saída de Temperatura
   digitalWrite(PIN_TEMP_OUT, temperaturaCelsius >= LIMIT_TEMP_CELSIUS ? HIGH : LOW);
+  Blynk.virtualWrite(PIN_TEMP_OUT, temperaturaCelsius >= LIMIT_TEMP_CELSIUS ? 255 : 0);
 
   // Saída de Umidade do Ar
   digitalWrite(PIN_UMIAR_OUT, umidadeArPercent >= LIMIT_UMIAR_PERCENT ? HIGH : LOW);
+  Blynk.virtualWrite(PIN_UMIAR_OUT, umidadeArPercent >= LIMIT_UMIAR_PERCENT ? 255 : 0);
 
   // Controle da Válvula de Umidade do Solo (Lógica de Histerese)
   if (!estadoValvula && umidadeSoloPercent <= LIMIT_UMISOLO_MIN_PERCENT) {
@@ -184,6 +207,8 @@ void atualizarSaidas() {
     estadoValvula = false; // Desliga a válvula se a umidade atingir o máximo
   }
   digitalWrite(PIN_UMISOLO_OUT, estadoValvula ? HIGH : LOW);
+  Blynk.virtualWrite(PIN_UMISOLO_OUT, estadoValvula ? 255 : 0);
+
 }
 
 void imprimirDadosSerial() {
